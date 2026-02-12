@@ -1,0 +1,27 @@
+resources:
+  jobs:
+    system_tables_setup:
+      name: "[${bundle.target}] System Tables - One-Time Setup"
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "4"
+
+      tasks:
+        - task_key: "setup"
+          notebook_task:
+            notebook_path: ../src/setup/00_setup.py
+            base_parameters:
+              target_catalog: ${var.target_catalog}
+
+      tags:
+        team: "data-engineering"
+        cost_center: "REVIEW-REQUIRED"
+        environment: "${bundle.target}"
+        project: "system_tables_archival"
+        job_type: "setup"
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: "users"

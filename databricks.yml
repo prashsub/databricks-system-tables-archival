@@ -1,0 +1,35 @@
+bundle:
+  name: system_tables_archival
+
+variables:
+  target_catalog:
+    description: "Unity Catalog catalog for archived system tables"
+    default: "system_tables_archive"
+  exclude_tables:
+    description: "Comma-separated system tables to skip (e.g. system.marketplace.listing_funnel_events)"
+    default: ""
+  warehouse_id:
+    description: "SQL Warehouse ID for alerts"
+    lookup:
+      warehouse: "Shared endpoint"
+
+include:
+  - resources/*.yml
+
+targets:
+  dev:
+    default: true
+    mode: development
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      profile: <your-cli-profile>
+    variables:
+      target_catalog: "system_tables_archive_dev"
+
+  prod:
+    mode: production
+    workspace:
+      host: https://<your-workspace>.cloud.databricks.com
+      profile: <your-cli-profile>
+    variables:
+      target_catalog: "system_tables_archive"

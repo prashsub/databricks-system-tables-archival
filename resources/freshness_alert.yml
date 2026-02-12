@@ -1,0 +1,39 @@
+resources:
+  jobs:
+    freshness_check:
+      name: "[${bundle.target}] System Tables - Check Freshness"
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "4"
+
+      tasks:
+        - task_key: "check_staleness"
+          sql_task:
+            file:
+              path: ../src/monitoring/freshness_check.sql
+              source: WORKSPACE
+            warehouse_id: ${var.warehouse_id}
+            parameters:
+              target_catalog: ${var.target_catalog}
+
+      schedule:
+        quartz_cron_expression: "0 0 8 * * ?"
+        timezone_id: "UTC"
+        pause_status: "UNPAUSED"
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
+      tags:
+        team: "data-engineering"                # Default — add tagging config to context/ to customize
+        cost_center: "REVIEW-REQUIRED"          # TODO: Add tagging config to context/ with cost_center
+        environment: "${bundle.target}"
+        project: "system_tables_archival"
+        job_type: "monitoring"
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: "users"

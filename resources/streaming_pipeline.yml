@@ -1,0 +1,20 @@
+resources:
+  pipelines:
+    system_tables_streaming:
+      name: "[${bundle.target}] Archive System Tables Pipeline"
+      catalog: "main"
+      target: "default"
+      libraries:
+        - glob:
+            include: ../src/streaming_etl/transformations/**
+      root_path: ../src/streaming_etl
+      serverless: true
+      continuous: false
+      photon: true
+      channel: current
+      configuration:
+        target_catalog: ${var.target_catalog}
+        exclude_tables: ${var.exclude_tables}
+      permissions:
+        - level: CAN_VIEW
+          group_name: "users"

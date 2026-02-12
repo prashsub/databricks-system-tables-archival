@@ -1,0 +1,51 @@
+resources:
+  jobs:
+    system_tables_archival_workflow:
+      name: "[${bundle.target}] System Tables - Ingest Archive"
+
+      environments:
+        - environment_key: "default"
+          spec:
+            environment_version: "4"
+
+      tasks:
+        - task_key: "streaming_pipeline"
+          pipeline_task:
+            pipeline_id: ${resources.pipelines.system_tables_streaming.id}
+            full_refresh: false
+
+        - task_key: "batch_companion"
+          depends_on:
+            - task_key: "streaming_pipeline"
+          notebook_task:
+            notebook_path: ../src/batch/batch_companion.py
+            base_parameters:
+              target_catalog: ${var.target_catalog}
+              tables_to_process: "all"
+              exclude_tables: ${var.exclude_tables}
+              watermark_buffer_hours: "4"
+
+      schedule:
+        quartz_cron_expression: "0 0 2 * * ?"
+        timezone_id: "UTC"
+        pause_status: "UNPAUSED"
+
+      queue:
+        enabled: true
+
+      max_concurrent_runs: 1
+
+      email_notifications:
+        on_failure:
+          - ${workspace.current_user.userName}
+
+      tags:
+        team: "data-engineering"                # Default — add tagging config to context/ to customize
+        cost_center: "REVIEW-REQUIRED"          # TODO: Add tagging config to context/ with cost_center
+        environment: "${bundle.target}"
+        project: "system_tables_archival"
+        job_type: "ingestion"
+
+      permissions:
+        - level: CAN_VIEW
+          group_name: "users"
