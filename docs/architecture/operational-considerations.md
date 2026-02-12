@@ -19,7 +19,7 @@ Databricks System Tables are delivered via **Delta Sharing**. The sharing provid
 ### Prevention
 
 - Pipeline runs daily at 2am UTC.
-- Freshness check job runs daily at 8am UTC and raises an error if any archive table is >48 hours stale — providing 5 days of buffer before the 168-hour VACUUM window.
+- Freshness check job runs daily at 8am UTC and raises an error if any archive table is >48 hours stale — providing 5 days of buffer before the 168-hour VACUUM window. Uses `IDENTIFIER(:target_catalog)` for parameterized catalog reference and `last_altered` from `information_schema.tables` for staleness detection.
 - Email notifications fire on any task failure.
 
 ## `skipChangeCommits` Explained

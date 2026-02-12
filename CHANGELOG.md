@@ -2,6 +2,14 @@
 
 All notable changes to the System Tables Archival project.
 
+## [1.3.1] - 2026-02-12
+
+### Fixed
+
+- Freshness check SQL: `${target_catalog}` → `IDENTIFIER(:target_catalog || '...')` for correct SQL task parameter substitution.
+- Freshness check SQL: `last_modified` → `last_altered` (correct column in `information_schema.tables`).
+- Cleaned up stale schemas (`ai`, `ingest`, `ml`, `network`, `quality`, `warehouse`, `default`) from archive catalog — artifacts from earlier pipeline iterations.
+
 ## [1.3.0] - 2026-02-11
 
 ### Added
