@@ -16,8 +16,8 @@ SELECT
                 ' hours ago.')
   END AS freshness_status
 FROM (
-  SELECT MAX(last_modified) AS change_time
-  FROM ${target_catalog}.information_schema.tables
+  SELECT MAX(last_altered) AS change_time
+  FROM IDENTIFIER(:target_catalog || '.information_schema.tables')
   WHERE table_schema IN (
     'access', 'billing', 'compute', 'lakeflow', 'marketplace',
     'mlflow', 'serving', 'sharing', 'storage', 'query'
