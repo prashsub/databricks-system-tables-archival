@@ -17,6 +17,7 @@ resources:
         - task_key: "batch_companion"
           depends_on:
             - task_key: "streaming_pipeline"
+          run_if: "ALL_DONE"
           notebook_task:
             notebook_path: ../src/batch/batch_companion.py
             base_parameters:

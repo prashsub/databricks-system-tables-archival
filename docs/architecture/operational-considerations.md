@@ -46,6 +46,18 @@ If the streaming pipeline fails mid-run (e.g., driver crash, OOM), some flow che
 
 **Fix**: Run a **Full Refresh** of the pipeline to clear all checkpoints and re-read from the source.
 
+## Checkpoint Table ID Mismatch
+
+If the upstream Delta Sharing provider recreates or modifies a system table (e.g., during a Databricks platform upgrade), the internal Delta table ID changes. Streaming checkpoints reference the old ID and refuse to read from the new one.
+
+**Symptom**: `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE` error on one or more flows.
+
+**Impact**: Affected flows fail. SDP treats any flow failure as a pipeline failure, but unaffected flows may still complete. The batch companion task uses `run_if: ALL_DONE` so it runs regardless of streaming outcome.
+
+**Fix**: Run a **Full Refresh** to clear all checkpoints: `databricks pipelines start-update <pipeline-id> --full-refresh`.
+
+**Prevention**: None — this is an upstream infrastructure event outside our control. The freshness alert at 48h provides early warning before the 168h VACUUM window.
+
 ## Duplicate Handling
 
 Duplicates can occur in two scenarios:

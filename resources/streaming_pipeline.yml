@@ -2,7 +2,7 @@ resources:
   pipelines:
     system_tables_streaming:
       name: "[${bundle.target}] Archive System Tables Pipeline"
-      catalog: "main"
+      catalog: ${var.target_catalog}
       target: "default"
       libraries:
         - glob:

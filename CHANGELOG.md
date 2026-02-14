@@ -2,6 +2,13 @@
 
 All notable changes to the System Tables Archival project.
 
+## [1.3.2] - 2026-02-13
+
+### Fixed
+
+- Batch companion now uses `run_if: ALL_DONE` so it runs even when the streaming pipeline fails partially. Previously, any streaming flow failure blocked all 10 batch tables.
+- Documented `DIFFERENT_DELTA_TABLE_READ_BY_STREAMING_SOURCE` checkpoint mismatch as a known failure mode with Full Refresh recovery.
+
 ## [1.3.1] - 2026-02-12
 
 ### Fixed
