@@ -38,6 +38,7 @@ SCHEMAS = [
 for schema in SCHEMAS:
     fqn = f"{TARGET_CATALOG}.{schema}"
     spark.sql(f"CREATE SCHEMA IF NOT EXISTS {fqn}")
-    print(f"  Schema '{fqn}' ready.")
+    spark.sql(f"ALTER SCHEMA {fqn} ENABLE PREDICTIVE OPTIMIZATION")
+    print(f"  Schema '{fqn}' ready (predictive optimization enabled).")
 
 print(f"\nSetup complete — {len(SCHEMAS)} schemas in '{TARGET_CATALOG}'.")

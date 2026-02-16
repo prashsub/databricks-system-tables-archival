@@ -7,28 +7,27 @@ Packaged as a **Databricks Asset Bundle (DAB)** with multi-environment support (
 ## Architecture
 
 ```
-+-------------------------------------------------------------------+
-|  Databricks Workflow: System Tables - Ingest Archive (daily 2am)  |
-|                                                                   |
-|  +----------------------------+  +------------------------------+ |
-|  | Task 1: SDP Pipeline       |  | Task 2: Batch Companion      | |
-|  | (streaming_archive.py)     |  | (batch_companion.py)         | |
-|  |                            |  |                              | |
-|  | Serverless, triggered      |  | Serverless compute           | |
-|  | 27 streaming tables        |  | 4 watermark-MERGE tables     | |
-|  | via append_flow +          |  | 6 full-overwrite tables      | |
-|  | Delta sinks                |  |                              | |
-|  +-----------+----------------+  +-----------+------------------+ |
-|              |                               |                    |
-|              v                               v                    |
-|  +-----------------------------------------------------------+   |
-|  |      ${var.target_catalog} (Unity Catalog)                 |   |
-|  |                                                            |   |
-|  |  12 schemas: access, billing, compute, data_classification |   |
-|  |  data_quality_monitoring, lakeflow, marketplace, mlflow,   |   |
-|  |  query, serving, sharing, storage                          |   |
-|  +-----------------------------------------------------------+   |
-+-------------------------------------------------------------------+
++---------------------------------------------------------------------------------+
+|  Databricks Workflow: System Tables - Ingest Archive (daily 2am)                |
+|                                                                                 |
+|  +--------------------+  +--------------------+  +--------------------+         |
+|  | Task 1: SDP        |  | Task 2: Dedup      |  | Task 3: Batch     |         |
+|  | Pipeline           |->| Streaming Sinks    |->| Companion         |         |
+|  |                    |  |                    |  |                    |         |
+|  | 27 streaming       |  | Skip if clean      |  | 4 watermark MERGE  |         |
+|  | tables via         |  | INSERT OVERWRITE   |  | 6 full overwrite   |         |
+|  | append_flow +      |  | if dupes found     |  | Serverless         |         |
+|  | Delta sinks        |  | + CLUSTER BY AUTO  |  |                    |         |
+|  +--------+-----------+  +--------+-----------+  +--------+-----------+         |
+|           |                       |                        |                    |
+|           v                       v                        v                    |
+|  +---------------------------------------------------------------------+       |
+|  |      ${var.target_catalog} (Unity Catalog)                           |       |
+|  |                                                                      |       |
+|  |  12 schemas, 37 tables                                               |       |
+|  |  CLUSTER BY AUTO + Predictive Optimization enabled                   |       |
+|  +---------------------------------------------------------------------+       |
++---------------------------------------------------------------------------------+
 ```
 
 For detailed architecture, design principles, and data flow, see [Architecture Overview](docs/architecture/architecture-overview.md).
@@ -40,15 +39,17 @@ system-tables-archival/
 +-- databricks.yml                              # Bundle config + targets (dev/prod)
 +-- resources/
 |   +-- streaming_pipeline.yml                  # SDP pipeline resource definition
-|   +-- archival_workflow.yml                   # Scheduled workflow (streaming + batch)
+|   +-- archival_workflow.yml                   # Scheduled workflow (streaming + dedup + batch)
 |   +-- setup_job.yml                           # One-time setup job (catalog/schema creation)
 |   +-- freshness_alert.yml                     # Alert: archive stale > 48 hours
 +-- src/
 |   +-- setup/
-|   |   +-- 00_setup.py                         # One-time catalog/schema creation
+|   |   +-- 00_setup.py                         # One-time catalog/schema creation + predictive optimization
 |   +-- streaming_etl/
 |   |   +-- transformations/
 |   |       +-- streaming_archive.py            # SDP pipeline -- raw .py (not notebook)
+|   +-- dedup/
+|   |   +-- dedup_streaming_tables.py           # Post-pipeline dedup with skip optimization
 |   +-- batch/
 |   |   +-- batch_companion.py                  # Batch notebook -- MERGE + overwrite
 |   +-- monitoring/
@@ -66,8 +67,8 @@ system-tables-archival/
 
 | Job | Schedule | Purpose |
 |-----|----------|---------|
-| **System Tables - Ingest Archive** | Daily 2am UTC | Runs streaming pipeline then batch companion |
-| **System Tables - One-Time Setup** | Manual (no schedule) | Creates target catalog and schemas |
+| **System Tables - Ingest Archive** | Daily 2am UTC | Streaming pipeline → Dedup streaming sinks → Batch companion |
+| **System Tables - One-Time Setup** | Manual (no schedule) | Creates target catalog and schemas with predictive optimization |
 | **System Tables - Check Freshness** | Daily 8am UTC | Alerts if archive >48h stale (VACUUM window is 168h) |
 
 ## Variables
@@ -82,9 +83,20 @@ system-tables-archival/
 
 | Strategy | Count | Description |
 |----------|-------|-------------|
-| **SDP Streaming** | 27 | Incremental via `append_flow` + Delta sinks. 4 tables require `responseFormat=delta` for DeletionVectors. |
+| **SDP Streaming** | 27 | Incremental via `append_flow` + Delta sinks. 4 tables require `responseFormat=delta` for DeletionVectors. Post-pipeline dedup removes any duplicates. |
 | **Batch Watermark MERGE** | 4 | Incremental via timestamp watermark + MERGE on natural keys. |
 | **Batch Full Overwrite** | 6 | Small reference tables replaced daily. |
+
+## Table Optimizations
+
+All 37 archive tables have the following optimizations enabled:
+
+| Optimization | Scope | Description |
+|-------------|-------|-------------|
+| **CLUSTER BY AUTO** | All tables | Automatic liquid clustering — Delta selects optimal clustering columns based on query patterns |
+| **Predictive Optimization** | All schemas | Databricks automatically runs OPTIMIZE, VACUUM, and ZORDER based on usage patterns |
+
+These optimizations are enforced by the setup notebook (schema-level) and the dedup notebook (table-level, on every run).
 
 For the complete table-by-table breakdown and decision framework, see [Ingestion Strategy](docs/architecture/ingestion-strategy.md).
 
@@ -124,8 +136,9 @@ For the full operational runbook including failure recovery, duplicate handling,
 Key points:
 
 - **VACUUM window**: System tables source data is vacuumed after 7 days. The freshness alert fires at 48h, giving 5 days to remediate.
-- **Full Refresh is safe**: Re-appends to sinks, never deletes existing archive data. Use when checkpoints are corrupted or stale.
+- **Full Refresh is safe**: Re-appends to sinks, never deletes existing archive data. The dedup task automatically removes the resulting duplicates.
 - **Never DROP or TRUNCATE** sink target tables -- this is your long-term archive.
+- **Dedup cost**: ~5 minutes on clean runs (scan-only). Only rewrites tables with actual duplicates.
 
 ## Known Limitations
 

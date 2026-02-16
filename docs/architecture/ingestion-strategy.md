@@ -38,6 +38,8 @@ Is the table streaming-capable (per Databricks docs)?
 
 **Risk**: If the pipeline falls >7 days behind, Delta Sharing VACUUMs the source and checkpoints become unrecoverable. Recovery requires a Full Refresh (which is safe -- it re-appends, never deletes).
 
+**Duplicate handling**: A post-pipeline dedup task removes any duplicates caused by Full Refresh or `skipChangeCommits` source-side compaction. The dedup checks for duplicate key groups first — if a table is clean, it skips the rewrite entirely (scan-only). On steady-state runs, this adds ~5 minutes of compute. The dedup also ensures `CLUSTER BY AUTO` is set on all streaming sink tables.
+
 ### Delta Format for DeletionVectors
 
 4 tables have `delta.enableDeletionVectors` enabled upstream. Without `responseFormat=delta`, Delta Sharing returns a `DS_UNSUPPORTED_DELTA_TABLE_FEATURES` error. These tables are flagged with `"delta_format": True` in the streaming config:
@@ -76,7 +78,7 @@ Is the table streaming-capable (per Databricks docs)?
 - Full overwrite would scan the entire source table every day -- expensive and slow.
 - Watermark MERGE reads only the incremental delta (typically hours or days of data).
 
-**Trade-off**: Requires knowing the correct watermark column and natural keys. Incorrect keys can cause duplicates (too narrow) or missed rows (too broad). Dedup views provide a safety net.
+**Trade-off**: Requires knowing the correct watermark column and natural keys. Incorrect keys can cause duplicates (too narrow) or missed rows (too broad).
 
 ### Non-Streaming Tables (4)
 

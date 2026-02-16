@@ -14,7 +14,7 @@ Databricks System Tables are delivered via **Delta Sharing**. The sharing provid
 
 1. Run a **Full Refresh** of the SDP pipeline.
 2. This is **safe** -- Full Refresh re-appends all currently available data to the sinks. It never drops or truncates existing archive data.
-3. **Trade-off**: You will get duplicates for the overlap period. Use dedup views to handle this.
+3. **Trade-off**: You will get duplicates for the overlap period. The `dedup_streaming_sinks` task runs automatically after the pipeline and removes them.
 
 ### Prevention
 
@@ -66,24 +66,43 @@ Duplicates can occur in two scenarios:
 
 A Full Refresh re-reads all available data and appends it to the sink. Data already in the archive gets appended again.
 
-**Mitigation**: Create dedup views for downstream consumers:
+**Mitigation**: The `dedup_streaming_sinks` workflow task runs automatically after every streaming pipeline execution. It removes duplicates from all 27 streaming sink tables using `INSERT OVERWRITE` with `ROW_NUMBER() OVER (PARTITION BY <natural_keys> ORDER BY <tiebreaker> DESC)`.
 
-```sql
-CREATE OR REPLACE VIEW ${catalog}.billing.usage_deduped AS
-SELECT * FROM (
-    SELECT *, ROW_NUMBER() OVER (
-        PARTITION BY usage_record_id
-        ORDER BY usage_date DESC
-    ) AS _rn
-    FROM ${catalog}.billing.usage
-) WHERE _rn = 1;
-```
+The dedup notebook (`src/dedup/dedup_streaming_tables.py`) contains the full natural key registry for all 27 tables. Each table's keys are categorized by pattern:
+
+| Category | Pattern | Example |
+|----------|---------|---------|
+| Event tables with unique ID | `event_id` or `record_id` | `access.audit` → `event_id` |
+| Snapshot/`_latest` tables | `workspace_id` + entity ID | `mlflow.runs_latest` → `workspace_id, run_id` |
+| SCD tables | entity ID + `change_time` | `compute.clusters` → `workspace_id, cluster_id, change_time` |
+| Timeline tables (hourly-sliced) | run ID + `period_start_time` | `lakeflow.job_run_timeline` → `workspace_id, run_id, period_start_time` |
+| Composite key (no unique ID) | Multiple event attributes | `compute.warehouse_events` → `workspace_id, warehouse_id, event_type, event_time` |
+
+**Safety**: `INSERT OVERWRITE` is atomic — either the full dedup succeeds or the table remains unchanged. If a table doesn't exist or is empty, it's safely skipped.
+
+**Skip optimization**: The dedup checks for duplicate key groups first using `GROUP BY ... HAVING COUNT(*) > 1 LIMIT 1`. If a table is clean (no duplicates), the expensive `INSERT OVERWRITE` is skipped entirely. This reduces steady-state runtime from ~15 min (full rewrite of all tables) to ~5 min (scan-only).
+
+| Scenario | Dedup Runtime | Action Taken |
+|----------|--------------|--------------|
+| After Full Refresh (billions of dupes) | ~79 min | Full `INSERT OVERWRITE` on all tables |
+| Steady state (no/few dupes) | ~5 min | Scan-only; skip rewrite on clean tables |
+
+### 1b. Source-Side Compaction Duplicates (skipChangeCommits)
+
+Even on normal incremental runs, a small number of duplicates (~1K) can appear. This is caused by `skipChangeCommits=true` behavior when Databricks runs OPTIMIZE/VACUUM on the source system tables:
+
+1. Source table files are compacted (rows deleted from old files, re-inserted into new files)
+2. `skipChangeCommits` correctly ignores the delete operations
+3. But the re-inserts from compaction appear as "new" data to the streaming reader
+4. These rows get re-appended to the sink, creating duplicates
+
+The dedup task catches and removes these automatically. The cost is negligible (~1K rows out of billions).
 
 ### 2. Overlapping Watermark Windows (Batch MERGE Tables)
 
 The 4-hour lookback buffer means some rows are re-read on consecutive runs. The MERGE with `WHEN NOT MATCHED THEN INSERT *` prevents duplicates as long as natural keys are correct.
 
-**If natural keys are incorrect**: Duplicates may appear. Use dedup views as a safety net and correct the keys.
+**If natural keys are incorrect**: Duplicates may appear. Fix the keys in the batch companion notebook's table config.
 
 ## Excluding and Re-Including Tables
 
@@ -153,8 +172,20 @@ When Databricks releases a new system table:
 |--------|------------|
 | Serverless compute | No idle cluster costs; pay per query |
 | Streaming (incremental) | Reads only new data since checkpoint |
+| Dedup with skip optimization | Scan-only on clean tables (~5 min); rewrites only when duplicates exist |
 | Watermark MERGE (incremental) | Reads only data newer than `max(watermark) - buffer` |
 | Full overwrite limited to reference tables | Only 6 tiny tables scanned fully |
+| CLUSTER BY AUTO | Automatic liquid clustering reduces scan cost for downstream queries |
+| Predictive Optimization | Auto OPTIMIZE/VACUUM/ZORDER reduces storage and improves query performance |
+
+### Typical Daily Runtime
+
+| Task | Steady State | After Full Refresh |
+|------|-------------|-------------------|
+| Streaming pipeline | ~2 min | ~13 min |
+| Dedup streaming sinks | ~5 min (scan-only) | ~79 min (full rewrite) |
+| Batch companion | ~4 min | ~5 min |
+| **Total** | **~11 min** | **~97 min** |
 
 ### Monitoring Cost
 

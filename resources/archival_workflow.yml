@@ -14,9 +14,18 @@ resources:
             pipeline_id: ${resources.pipelines.system_tables_streaming.id}
             full_refresh: false
 
-        - task_key: "batch_companion"
+        - task_key: "dedup_streaming_sinks"
           depends_on:
             - task_key: "streaming_pipeline"
+          run_if: "ALL_DONE"
+          notebook_task:
+            notebook_path: ../src/dedup/dedup_streaming_tables.py
+            base_parameters:
+              target_catalog: ${var.target_catalog}
+
+        - task_key: "batch_companion"
+          depends_on:
+            - task_key: "dedup_streaming_sinks"
           run_if: "ALL_DONE"
           notebook_task:
             notebook_path: ../src/batch/batch_companion.py

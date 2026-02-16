@@ -1,3 +1,5 @@
 .claude/
-.cursor/skills/
+.cursor/
+.vscode/
 ai-dev-kit/
+context/

@@ -2,6 +2,28 @@
 
 All notable changes to the System Tables Archival project.
 
+## [1.4.0] - 2026-02-15
+
+### Added
+
+- Post-pipeline deduplication notebook (`src/dedup/dedup_streaming_tables.py`) that removes duplicate rows from all 27 streaming sink tables after a Full Refresh.
+- Natural key registry for all 27 streaming tables, organized by category:
+  - 10 event tables with unique row ID (`event_id`, `record_id`, `databricks_request_id`, etc.)
+  - 2 snapshot/`_latest` tables (`experiments_latest`, `runs_latest`) keyed by `workspace_id` + entity ID
+  - 6 SCD tables keyed by entity ID + `change_time`
+  - 3 timeline tables keyed by run/update ID + `period_start_time` (hourly slicing)
+  - 3 event tables without unique ID using composite keys (`warehouse_events`, marketplace tables)
+  - 1 node timeline table keyed by `cluster_id, instance_id, start_time`
+  - 2 zerobus internal tables (`stream_id` / `stream_id, commit_version`)
+- Dedup task added to archival workflow between streaming pipeline and batch companion (`run_if: ALL_DONE`).
+- Uses `INSERT OVERWRITE` with `ROW_NUMBER()` window function for atomic, safe dedup.
+- Enabled **automatic liquid clustering** (`CLUSTER BY AUTO`) on all 37 archive tables. Dedup notebook enforces clustering on every run for new tables.
+- Enabled **predictive optimization** on all 12 archive schemas. Setup notebook now enables it during initial schema creation.
+
+### Performance
+
+- Steady-state dedup runtime: ~15 min (24 tables, minimal/no duplicates). First run with 46B duplicates: ~79 min.
+
 ## [1.3.2] - 2026-02-13
 
 ### Fixed
