@@ -2,6 +2,32 @@
 
 All notable changes to the System Tables Archival project.
 
+## [1.5.0] - 2026-10-08
+
+### Fixed
+
+- `DELTA_METADATA_MISMATCH` on streaming sinks when Databricks adds columns or struct fields to a system table. For example, `lakeflow_jobs_flow` failed after `system.lakeflow.jobs` gained a top-level `triggers` column and a nested `trigger.paused` field. An already-failed flow recovers on the next normal pipeline update — no full refresh.
+- The freshness check could never fire. It used `MAX(last_altered)` from `information_schema.tables`, which the dedup task's daily `ALTER TABLE ... CLUSTER BY AUTO` bumps on every sink, whether or not data arrived.
+
+### Changed
+
+- All 27 streaming sinks set `mergeSchema=true` in their `create_sink` options. Sink and flow names are unchanged, so checkpoints carry over.
+- The batch watermark MERGE now uses `MERGE WITH SCHEMA EVOLUTION`. The plain form dropped new top-level columns and failed with `DELTA_UPDATE_SCHEMA_MISMATCH_EXPRESSION` on new nested fields.
+- The **Check Freshness** job now runs a serverless notebook (`src/monitoring/freshness_check.py`) instead of a SQL task. It checks each of the 31 incremental tables against its source system table and fails if the source has rows more than `stale_threshold_hours` (default 48) newer than the archive. The job key, name, 8am UTC schedule, email notifications, tags and permissions are unchanged. The job now also honors `exclude_tables`.
+
+### Removed
+
+- `warehouse_id` bundle variable and its deploy-time lookup of a warehouse named "Shared endpoint". The freshness check no longer needs a SQL warehouse.
+- `src/monitoring/freshness_check.sql`.
+
+### Upgrading an existing deployment
+
+- Merge the changes, keep your own `targets` host and profile, then run `databricks bundle validate --strict --target <target>` and `databricks bundle deploy --target <target>`.
+- The deploy updates resources in place. No resource is deleted and no table is dropped, renamed or rewritten. If the deploy plan shows a delete, stop and investigate.
+- If your fork references `var.warehouse_id` anywhere else, keep the variable or remove those references. `bundle validate --strict` fails on a dangling reference.
+- Run the ingest workflow normally. Don't run a full refresh. Confirm the pipeline's `current` channel resolves to Databricks Runtime 18.x (the `runtime_details` event in the pipeline event log); the fix was validated on 18.3.
+- Rollback: `git revert` and redeploy. Columns already added by schema evolution remain, which is harmless.
+
 ## [1.4.0] - 2026-02-15
 
 ### Added

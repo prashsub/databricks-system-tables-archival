@@ -8,10 +8,6 @@ variables:
   exclude_tables:
     description: "Comma-separated system tables to skip (e.g. system.marketplace.listing_funnel_events)"
     default: ""
-  warehouse_id:
-    description: "SQL Warehouse ID for alerts"
-    lookup:
-      warehouse: "Shared endpoint"
 
 include:
   - resources/*.yml

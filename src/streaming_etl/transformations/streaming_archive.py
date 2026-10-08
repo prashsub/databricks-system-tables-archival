@@ -7,7 +7,10 @@ Delta sink tables using append_flow + Delta sinks.
 Key properties:
 - Full refresh is safe: re-appends to sinks, never deletes historical data.
 - skipChangeCommits = true: handles upstream rolling deletes from Delta Sharing.
-- Triggered mode: scheduled daily via Databricks Workflow.
+- mergeSchema = true on every sink: Databricks adds columns and struct fields to
+  system tables without notice, and the sink evolves the archive table to match.
+  Additive only; existing columns are never changed or dropped.
+- Triggered mode: scheduled daily via Lakeflow Jobs.
 
 Pipeline configuration parameter:
 - target_catalog: Unity Catalog catalog for archived tables (e.g. system_tables_archive)
@@ -94,7 +97,7 @@ def register_sink_and_flow(config: dict) -> None:
     dp.create_sink(
         name=sink_name,
         format="delta",
-        options={"tableName": target_table},
+        options={"tableName": target_table, "mergeSchema": "true"},
     )
 
     @dp.append_flow(name=flow_name, target=sink_name)

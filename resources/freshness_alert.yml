@@ -10,13 +10,12 @@ resources:
 
       tasks:
         - task_key: "check_staleness"
-          sql_task:
-            file:
-              path: ../src/monitoring/freshness_check.sql
-              source: WORKSPACE
-            warehouse_id: ${var.warehouse_id}
-            parameters:
+          notebook_task:
+            notebook_path: ../src/monitoring/freshness_check.py
+            base_parameters:
               target_catalog: ${var.target_catalog}
+              exclude_tables: ${var.exclude_tables}
+              stale_threshold_hours: "48"
 
       schedule:
         quartz_cron_expression: "0 0 8 * * ?"

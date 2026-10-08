@@ -43,7 +43,7 @@ The System Tables Archival pipeline preserves Databricks System Table data indef
 |  +--------------------------+     +--------------------------+         |
 |  | Freshness Check Job      |     | One-Time Setup Job       |         |
 |  | Daily 8am UTC            |     | Manual trigger only      |         |
-|  | Alerts if >48h stale     |     | Creates catalog/schemas  |         |
+|  | Per-table lag >48h       |     | Creates catalog/schemas  |         |
 |  +--------------------------+     +--------------------------+         |
 +-----------------------------------------------------------------------+
 ```
@@ -54,7 +54,7 @@ The System Tables Archival pipeline preserves Databricks System Table data indef
 |-----|----------|---------|
 | **System Tables - Ingest Archive** | Daily 2am UTC | Streaming pipeline (Task 1) → Dedup streaming sinks (Task 2) → Batch companion (Task 3) |
 | **System Tables - One-Time Setup** | Manual | Creates target catalog and 12 schemas with predictive optimization enabled |
-| **System Tables - Check Freshness** | Daily 8am UTC | Alerts if archive >48h stale (5-day buffer before 168h VACUUM window) |
+| **System Tables - Check Freshness** | Daily 8am UTC | Serverless notebook. Fails if any incremental archive table lags its source by >48h (5-day buffer before 168h VACUUM window) |
 
 ## Design Principles
 
@@ -78,7 +78,8 @@ Streaming via SDP Delta sinks is the preferred ingestion method because it provi
 
 - Each streaming flow is independent; one failure doesn't block others.
 - Batch tables are wrapped in try/except; failures are logged but don't stop the run.
-- Freshness check alerts at 48 hours, providing 5 days of buffer before the 168-hour VACUUM window is breached.
+- Freshness check fails at 48 hours of per-table lag behind the source, providing 5 days of buffer before the 168-hour VACUUM window is breached.
+- Schema evolution is automatic and additive: sinks set `mergeSchema` and the batch MERGE uses `WITH SCHEMA EVOLUTION`, so new upstream columns never stop a run.
 
 ## Technology Stack
 
@@ -87,11 +88,11 @@ Streaming via SDP Delta sinks is the preferred ingestion method because it provi
 | Streaming pipeline | SDP (Spark Declarative Pipelines) | Incremental streaming with Delta sinks |
 | Dedup notebook | Databricks Notebook (Serverless) | Post-pipeline duplicate removal with skip optimization |
 | Batch notebook | Databricks Notebook (Serverless) | Watermark MERGE + full overwrite |
-| Packaging | Databricks Asset Bundles | Multi-environment deployment |
+| Packaging | Declarative Automation Bundles (DABs) | Multi-environment deployment |
 | Compute | Serverless | No cluster management overhead |
 | Storage | Delta Lake (Unity Catalog) | ACID transactions, schema evolution |
 | Table optimization | Liquid Clustering + Predictive Optimization | Auto-tuned layout and maintenance |
-| Monitoring | SQL-based freshness check | Staleness alerting |
+| Monitoring | Freshness notebook (Serverless) | Per-table archive-vs-source lag check |
 
 ## Data Flow
 
@@ -106,7 +107,7 @@ Streaming via SDP Delta sinks is the preferred ingestion method because it provi
 | 7 | Batch Notebook (Task 3) | Runs after dedup completes (`run_if: ALL_DONE`) |
 | 8 | Watermark MERGE | Reads rows newer than `max(watermark) - buffer` from 4 source tables, MERGEs into archive |
 | 9 | Full Overwrite | Overwrites 6 small reference tables in archive |
-| 10 | Freshness Check (separate job) | Queries `information_schema.tables` at 8am UTC, raises error if any table >48h stale |
+| 10 | Freshness Check (separate job) | At 8am UTC, compares each incremental archive table's latest timestamp against its source and fails if the source has rows >48h newer |
 
 ## Integration Points
 
@@ -115,4 +116,3 @@ Streaming via SDP Delta sinks is the preferred ingestion method because it provi
 | Delta Sharing (system tables) | Inbound | Delta Sharing | Source tables delivered via sharing; requires `skipChangeCommits=true`. Some tables require `responseFormat=delta` for DeletionVectors compatibility. |
 | Unity Catalog | Bidirectional | UC API | Archive tables are UC-managed Delta tables |
 | Email notifications | Outbound | SMTP | Failure alerts to workspace user |
-| SQL Warehouse | Query | SQL | Freshness check runs on shared SQL warehouse |

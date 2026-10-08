@@ -19,7 +19,8 @@ Databricks System Tables are delivered via **Delta Sharing**. The sharing provid
 ### Prevention
 
 - Pipeline runs daily at 2am UTC.
-- Freshness check job runs daily at 8am UTC and raises an error if any archive table is >48 hours stale — providing 5 days of buffer before the 168-hour VACUUM window. Uses `IDENTIFIER(:target_catalog)` for parameterized catalog reference and `last_altered` from `information_schema.tables` for staleness detection.
+- Freshness check job runs daily at 8am UTC (serverless notebook `src/monitoring/freshness_check.py`) and fails if any incrementally archived table is >48 hours behind its source — providing 5 days of buffer before the 168-hour VACUUM window. For each of the 31 incremental tables, it takes the archive's latest timestamp and probes the source system table for rows newer than that plus the threshold. Comparing against the source means quiet tables with no new rows don't raise false alarms. The 6 full-overwrite tables are not checked.
+  - Why not `last_altered`? The dedup task runs `ALTER TABLE ... CLUSTER BY AUTO` on every sink daily, which bumps `information_schema.tables.last_altered` even when no data arrived. A `last_altered`-based check can never fire.
 - Email notifications fire on any task failure.
 
 ## `skipChangeCommits` Explained
@@ -56,7 +57,32 @@ If the upstream Delta Sharing provider recreates or modifies a system table (e.g
 
 **Fix**: Run a **Full Refresh** to clear all checkpoints: `databricks pipelines start-update <pipeline-id> --full-refresh`.
 
-**Prevention**: None — this is an upstream infrastructure event outside our control. The freshness alert at 48h provides early warning before the 168h VACUUM window.
+**Prevention**: None — this is an upstream infrastructure event outside our control. The freshness job at 48h provides early warning before the 168h VACUUM window.
+
+## Schema Mismatch on a Sink (`DELTA_METADATA_MISMATCH`)
+
+**Symptom**: One flow fails with `[DELTA_METADATA_MISMATCH.SCHEMA_MISMATCH]` (sometimes with an `ACL_ENABLED` sub-error suggesting `ALTER TABLE`). Example: `lakeflow_jobs_flow` failed when Databricks added a top-level `triggers` column and a nested `trigger.paused` field to `system.lakeflow.jobs`.
+
+**Cause**: Databricks adds columns and struct fields to system tables without notice. A Delta sink with no schema-evolution option refuses to write a wider schema to its target table.
+
+**Why `ACL_ENABLED` appears**: On compute that enforces access controls, such as serverless, the session-wide `spark.databricks.delta.schema.autoMerge.enabled` setting isn't honored. When no per-write option is set, the error points you to `ALTER TABLE`. Setting `mergeSchema` on the sink is the per-write option, and it works on serverless (validated on Databricks Runtime 18.3).
+
+**Fix (since 1.5.0)**: Every sink sets `"mergeSchema": "true"` in its `create_sink` options, so new columns and nested fields are added automatically. A flow that has already failed recovers on the next normal pipeline update after deploying 1.5.0:
+
+- No full refresh is needed. Sink and flow names are unchanged, so each flow resumes from its checkpoint.
+- No duplicates are written, and existing archive data is untouched.
+- Don't set `autoMerge` session-wide as a workaround.
+
+**Manual fallback**: If a change can't be applied automatically, add the missing fields by hand, then rerun the pipeline. Nested fields use dotted paths (`col.field`, `col.element.field` for array elements, `col.value.field` for map values). This needs `MODIFY` (or ownership) on the table plus `USE CATALOG` and `USE SCHEMA`.
+
+```sql
+ALTER TABLE <target_catalog>.lakeflow.jobs ADD COLUMNS (
+  trigger.paused BOOLEAN,
+  triggers ARRAY<STRUCT<...>>   -- copy the type from DESCRIBE system.lakeflow.jobs
+);
+```
+
+Never drop and recreate the archive table to work around a schema mismatch — it holds history that no longer exists in the source.
 
 ## Duplicate Handling
 
@@ -160,9 +186,11 @@ When Databricks releases a new system table:
 
 | Strategy | Schema Evolution Behavior |
 |----------|--------------------------|
-| Streaming (SDP sinks) | New columns flow automatically. No action needed. |
+| Streaming (SDP sinks) | Sinks set `mergeSchema=true`, so new top-level columns and nested struct, array-element, and map-value fields are added automatically. Without it, the flow fails with `DELTA_METADATA_MISMATCH` — see above. |
 | Batch overwrite | `overwriteSchema=true` handles new columns automatically. |
-| Batch watermark MERGE | **Manual action required.** New columns need `ALTER TABLE ADD COLUMN` on the target before the MERGE picks them up. |
+| Batch watermark MERGE | `MERGE WITH SCHEMA EVOLUTION` adds new top-level columns and nested fields automatically. A plain `MERGE INTO ... INSERT *` silently drops new top-level columns and fails with `DELTA_UPDATE_SCHEMA_MISMATCH_EXPRESSION` on new nested fields. |
+
+All schema evolution is additive. Existing columns are never changed or dropped, so archived history is untouched. Non-additive upstream changes, such as a column type change, are not evolved automatically and will fail the write. Investigate those case by case. For missing columns that weren't added automatically, use the manual `ALTER TABLE ... ADD COLUMNS` fallback described in the `DELTA_METADATA_MISMATCH` section above.
 
 ## Cost Optimization
 

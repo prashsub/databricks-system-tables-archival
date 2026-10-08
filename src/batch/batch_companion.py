@@ -158,7 +158,9 @@ def process_watermark_table(config: dict) -> dict:
         return {"table": source, "strategy": "watermark_merge", "status": "success",
                 "rows_read": source_count, "elapsed_s": round(elapsed, 1), "note": "initial_load"}
 
-    # MERGE with null-safe equality on natural keys
+    # MERGE with null-safe equality on natural keys. WITH SCHEMA EVOLUTION adds
+    # columns and struct fields that Databricks introduces upstream; without it,
+    # a new nested field fails the MERGE (DELTA_UPDATE_SCHEMA_MISMATCH_EXPRESSION).
     source_df.createOrReplaceTempView("_source_batch")
 
     merge_condition = " AND ".join(
@@ -166,7 +168,7 @@ def process_watermark_table(config: dict) -> dict:
     )
 
     spark.sql(f"""
-        MERGE INTO {target_fqn} AS target
+        MERGE WITH SCHEMA EVOLUTION INTO {target_fqn} AS target
         USING _source_batch AS source
         ON {merge_condition}
         WHEN NOT MATCHED THEN INSERT *

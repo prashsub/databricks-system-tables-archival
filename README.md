@@ -41,7 +41,7 @@ system-tables-archival/
 |   +-- streaming_pipeline.yml                  # SDP pipeline resource definition
 |   +-- archival_workflow.yml                   # Scheduled workflow (streaming + dedup + batch)
 |   +-- setup_job.yml                           # One-time setup job (catalog/schema creation)
-|   +-- freshness_alert.yml                     # Alert: archive stale > 48 hours
+|   +-- freshness_alert.yml                     # Freshness job: fails if any table lags its source > 48 hours
 +-- src/
 |   +-- setup/
 |   |   +-- 00_setup.py                         # One-time catalog/schema creation + predictive optimization
@@ -53,7 +53,7 @@ system-tables-archival/
 |   +-- batch/
 |   |   +-- batch_companion.py                  # Batch notebook -- MERGE + overwrite
 |   +-- monitoring/
-|       +-- freshness_check.sql                 # Freshness SQL for staleness alert
+|       +-- freshness_check.py                  # Per-table freshness notebook (archive vs. source lag)
 +-- docs/
 |   +-- architecture/
 |       +-- architecture-overview.md            # System architecture and design principles
@@ -69,7 +69,7 @@ system-tables-archival/
 |-----|----------|---------|
 | **System Tables - Ingest Archive** | Daily 2am UTC | Streaming pipeline → Dedup streaming sinks → Batch companion |
 | **System Tables - One-Time Setup** | Manual (no schedule) | Creates target catalog and schemas with predictive optimization |
-| **System Tables - Check Freshness** | Daily 8am UTC | Alerts if archive >48h stale (VACUUM window is 168h) |
+| **System Tables - Check Freshness** | Daily 8am UTC | Serverless notebook. Fails and emails if any archive table lags its source system table by >48h (VACUUM window is 168h). No SQL warehouse needed. |
 
 ## Variables
 
@@ -77,7 +77,6 @@ system-tables-archival/
 |----------|-------------|-------------|--------------|
 | `target_catalog` | Unity Catalog catalog for archived tables | `system_tables_archive_dev` | `system_tables_archive` |
 | `exclude_tables` | Comma-separated system tables to skip (e.g. `system.marketplace.listing_funnel_events`) | `""` (archive all) | `""` (archive all) |
-| `warehouse_id` | SQL Warehouse for freshness checks | Looked up by name ("Shared endpoint") | Looked up by name |
 
 ## Table Assignments (37 tables)
 
@@ -135,17 +134,17 @@ For the full operational runbook including failure recovery, duplicate handling,
 
 Key points:
 
-- **VACUUM window**: System tables source data is vacuumed after 7 days. The freshness alert fires at 48h, giving 5 days to remediate.
+- **VACUUM window**: System tables source data is vacuumed after 7 days. The freshness job checks each incremental table against its source and fails if the source has rows more than 48h newer than the archive, giving 5 days to remediate. Quiet tables with no new source rows don't raise false alarms.
+- **Schema evolution is automatic**: Databricks adds columns and struct fields to system tables without notice. Streaming sinks use `mergeSchema` and the batch MERGE uses `MERGE WITH SCHEMA EVOLUTION`, so new fields are added to the archive. Changes are additive only.
 - **Full Refresh is safe**: Re-appends to sinks, never deletes existing archive data. The dedup task automatically removes the resulting duplicates.
 - **Never DROP or TRUNCATE** sink target tables -- this is your long-term archive.
 - **Dedup cost**: ~5 minutes on clean runs (scan-only). Only rewrites tables with actual duplicates.
 
 ## Known Limitations
 
-1. **`Trigger.AvailableNow` converted to `Trigger.Once`**: Delta Sharing streaming converts `AvailableNow` to `Once`. Expected, does not affect correctness.
+1. **`Trigger.AvailableNow` on older runtimes**: Delta Sharing streaming supports `AvailableNow` on Databricks Runtime 18 and above. On older runtimes it's converted to `Trigger.Once`, which doesn't affect correctness.
 2. **7-day checkpoint staleness**: If the pipeline falls >7 days behind, checkpoints become unrecoverable. Recovery: Full Refresh.
 3. **No expectations on sinks**: SDP data quality checks are not supported on Delta sinks.
-4. **Schema evolution for MERGE tables**: New columns require manual `ALTER TABLE ADD COLUMN` on the target.
 
 ## Documentation
 
