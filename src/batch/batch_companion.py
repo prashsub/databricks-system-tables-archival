@@ -13,9 +13,19 @@
 # COMMAND ----------
 
 import json
+import sys
 import time
 import traceback
 from datetime import datetime
+
+_nb_path = dbutils.notebook.entry_point.getDbutils().notebook().getContext().notebookPath().get()
+_bundle_root = str(_nb_path).rsplit("/src/", 1)[0]
+if not _bundle_root.startswith("/Workspace"):
+    _bundle_root = "/Workspace" + _bundle_root
+if _bundle_root not in sys.path:
+    sys.path.insert(0, _bundle_root)
+
+from src.common.table_features import ensure_table_features
 
 # COMMAND ----------
 
@@ -246,6 +256,24 @@ for cfg in BATCH_WATERMARK_TABLES:
             "error": str(e),
         })
 
+# Row tracking + change data feed let downstream consumers read the MERGE targets
+# incrementally. Full-overwrite tables are skipped: their CDF would be the whole
+# table every day. A failure here is a warning only.
+feature_warnings = []
+for cfg in BATCH_WATERMARK_TABLES:
+    if not should_process(cfg["source"]):
+        continue
+    target_fqn = f"{TARGET_CATALOG}.{cfg['target_schema']}.{cfg['target_table']}"
+    if not spark.catalog.tableExists(target_fqn):
+        continue
+    try:
+        outcome = ensure_table_features(spark, target_fqn)
+        if outcome["status"] == "enabled":
+            print(f"  [{cfg['source']}] enabled {', '.join(sorted(outcome['set']))}")
+    except Exception as e:
+        print(f"  [{cfg['source']}] WARNING: enabling row tracking / CDF failed: {e}")
+        feature_warnings.append({cfg["source"]: str(e)})
+
 print()
 print("=" * 70)
 print("FULL OVERWRITE TABLES")
@@ -288,6 +316,7 @@ print(f"  Succeeded:               {len(succeeded)}")
 print(f"  Failed:                  {len(failed)}")
 print(f"  Total rows ingested:     {total_rows:,}")
 print(f"  Total elapsed time:      {total_elapsed:.1f}s")
+print(f"  Feature warnings:        {len(feature_warnings)}")
 print()
 
 if failed:
@@ -320,6 +349,7 @@ summary = {
     "total_rows_ingested": total_rows,
     "total_elapsed_s": round(total_elapsed, 1),
     "failed_tables": [{r["table"]: r.get("error", "unknown")} for r in failed],
+    "feature_warnings": feature_warnings,
 }
 
 dbutils.notebook.exit(json.dumps(summary))

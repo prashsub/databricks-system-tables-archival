@@ -43,6 +43,8 @@ system-tables-archival/
 |   +-- setup_job.yml                           # One-time setup job (catalog/schema creation)
 |   +-- freshness_alert.yml                     # Freshness job: fails if any table lags its source > 48 hours
 +-- src/
+|   +-- common/
+|   |   +-- table_features.py                   # Row tracking + change data feed enablement
 |   +-- setup/
 |   |   +-- 00_setup.py                         # One-time catalog/schema creation + predictive optimization
 |   +-- streaming_etl/
@@ -50,6 +52,7 @@ system-tables-archival/
 |   |       +-- streaming_archive.py            # SDP pipeline -- raw .py (not notebook)
 |   +-- dedup/
 |   |   +-- dedup_streaming_tables.py           # Post-pipeline dedup with skip optimization
+|   |   +-- dedup_logic.py                      # Natural key registry + dedup SQL (unit tested)
 |   +-- batch/
 |   |   +-- batch_companion.py                  # Batch notebook -- MERGE + overwrite
 |   +-- monitoring/
@@ -59,6 +62,9 @@ system-tables-archival/
 |       +-- architecture-overview.md            # System architecture and design principles
 |       +-- ingestion-strategy.md               # Why streaming vs. batch for each table
 |       +-- operational-considerations.md       # VACUUM window, duplicates, schema evolution
++-- tests/
+|   +-- unit/                                   # pytest: uv run --with pytest pytest -q
+|   +-- integration/                            # Databricks notebook: dedup + row tracking on real Delta tables
 +-- QUICKSTART.md                               # Commands-only quick start
 +-- CHANGELOG.md                                # Version history
 ```
@@ -94,8 +100,9 @@ All 37 archive tables have the following optimizations enabled:
 |-------------|-------|-------------|
 | **CLUSTER BY AUTO** | All tables | Automatic liquid clustering — Delta selects optimal clustering columns based on query patterns |
 | **Predictive Optimization** | All schemas | Databricks automatically runs OPTIMIZE, VACUUM, and ZORDER based on usage patterns |
+| **Row tracking + change data feed** | 27 streaming sinks + 4 watermark MERGE tables | Stable `_metadata.row_id` per row (the dedup keeps the earliest-written copy) and row-level changes for incremental downstream reads via `table_changes()` / `readChangeFeed`. Not enabled on the 6 full-overwrite tables. |
 
-These optimizations are enforced by the setup notebook (schema-level) and the dedup notebook (table-level, on every run).
+These optimizations are enforced by the setup notebook (schema-level), the dedup notebook (streaming sinks, on every run) and the batch notebook (watermark tables). Row tracking and CDF are switched on the first time each notebook runs after upgrading to 1.6.0; see [Row Tracking and Change Data Feed](docs/architecture/operational-considerations.md#row-tracking-and-change-data-feed).
 
 For the complete table-by-table breakdown and decision framework, see [Ingestion Strategy](docs/architecture/ingestion-strategy.md).
 
@@ -136,14 +143,14 @@ Key points:
 
 - **VACUUM window**: System tables source data is vacuumed after 7 days. The freshness job checks each incremental table against its source and fails if the source has rows more than 48h newer than the archive, giving 5 days to remediate. Quiet tables with no new source rows don't raise false alarms.
 - **Schema evolution is automatic**: Databricks adds columns and struct fields to system tables without notice. Streaming sinks use `mergeSchema` and the batch MERGE uses `MERGE WITH SCHEMA EVOLUTION`, so new fields are added to the archive. Changes are additive only.
-- **Full Refresh is safe**: Re-appends to sinks, never deletes existing archive data. The dedup task automatically removes the resulting duplicates.
+- **Full Refresh only through the Ingest Archive job**: A full refresh re-appends everything still in the source to the sinks and never deletes archive data, but it leaves those rows duplicated until the job's `dedup_streaming_sinks` task runs. Trigger it as a full-refresh run of the **System Tables - Ingest Archive** job (see [QUICKSTART](QUICKSTART.md#troubleshooting)), never as a standalone pipeline update. Once row tracking is on, the dedup keeps the earliest-written copy of each row, so downstream edits to archived rows survive the re-append. The exception is the 3 latest-state tables (`mlflow.experiments_latest`, `mlflow.runs_latest`, `lakeflow.zerobus_stream`), where the newest version still wins. If any table can't be deduplicated or verified, the task fails and emails you.
 - **Never DROP or TRUNCATE** sink target tables -- this is your long-term archive.
 - **Dedup cost**: ~5 minutes on clean runs (scan-only). Only rewrites tables with actual duplicates.
 
 ## Known Limitations
 
 1. **`Trigger.AvailableNow` on older runtimes**: Delta Sharing streaming supports `AvailableNow` on Databricks Runtime 18 and above. On older runtimes it's converted to `Trigger.Once`, which doesn't affect correctness.
-2. **7-day checkpoint staleness**: If the pipeline falls >7 days behind, checkpoints become unrecoverable. Recovery: Full Refresh.
+2. **7-day checkpoint staleness**: If the pipeline falls >7 days behind, checkpoints become unrecoverable. Recovery: a full-refresh run of the Ingest Archive job, so the dedup task removes the re-appended rows. Data the source has already vacuumed can't be recovered.
 3. **No expectations on sinks**: SDP data quality checks are not supported on Delta sinks.
 
 ## Documentation

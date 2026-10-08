@@ -36,9 +36,9 @@ Is the table streaming-capable (per Databricks docs)?
 - **Minimal compute**: Only reads new data since last checkpoint.
 - **No key/watermark guessing**: The stream handles incremental logic automatically.
 
-**Risk**: If the pipeline falls >7 days behind, Delta Sharing VACUUMs the source and checkpoints become unrecoverable. Recovery requires a Full Refresh (which is safe -- it re-appends, never deletes).
+**Risk**: If the pipeline falls >7 days behind, Delta Sharing VACUUMs the source and checkpoints become unrecoverable. Recovery requires a Full Refresh, run through the Ingest Archive job. It re-appends and never deletes, so the re-read rows are duplicated until the job's dedup task removes them.
 
-**Duplicate handling**: A post-pipeline dedup task removes any duplicates caused by Full Refresh or `skipChangeCommits` source-side compaction. The dedup checks for duplicate key groups first — if a table is clean, it skips the rewrite entirely (scan-only). On steady-state runs, this adds ~5 minutes of compute. The dedup also ensures `CLUSTER BY AUTO` is set on all streaming sink tables.
+**Duplicate handling**: A post-pipeline dedup task removes any duplicates caused by Full Refresh or `skipChangeCommits` source-side compaction. The dedup checks for duplicate key groups first — if a table is clean, it skips the rewrite entirely (scan-only). On steady-state runs, this adds ~5 minutes of compute. On row-tracked tables it keeps the earliest-written copy of each key, it verifies one row per key after every rewrite, and it fails the task if any table can't be fixed. The dedup also ensures `CLUSTER BY AUTO`, row tracking and change data feed on all streaming sink tables.
 
 ### Delta Format for DeletionVectors
 

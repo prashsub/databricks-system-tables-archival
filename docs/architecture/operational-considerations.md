@@ -12,9 +12,13 @@ Databricks System Tables are delivered via **Delta Sharing**. The sharing provid
 
 ### Recovery When Checkpoint is Stale
 
-1. Run a **Full Refresh** of the SDP pipeline.
-2. This is **safe** -- Full Refresh re-appends all currently available data to the sinks. It never drops or truncates existing archive data.
-3. **Trade-off**: You will get duplicates for the overlap period. The `dedup_streaming_sinks` task runs automatically after the pipeline and removes them.
+1. Run a full refresh **through the System Tables - Ingest Archive job**, not as a standalone pipeline update:
+   ```bash
+   databricks jobs run-now --json '{"job_id": <archival_job_id>, "pipeline_params": {"full_refresh": true}}'
+   ```
+2. The full refresh re-appends all currently available source data to the sinks. It never drops or truncates existing archive data.
+3. **Trade-off**: every re-read row is now in the sink twice. The job's `dedup_streaming_sinks` task runs right after the pipeline and removes the duplicates (see [Duplicate Handling](#duplicate-handling)). A standalone `databricks pipelines start-update --full-refresh` skips that task, and the duplicates stay until the next scheduled run, as does any downstream double counting.
+4. If the dedup task fails, it emails you and names each table it couldn't fix. Those tables keep their duplicates until it succeeds; rerun the job (without a full refresh) after fixing the cause.
 
 ### Prevention
 
@@ -45,7 +49,7 @@ If the streaming pipeline fails mid-run (e.g., driver crash, OOM), some flow che
 
 > Delta sharing table null doesn't exist. Please delete your streaming query checkpoint and restart.
 
-**Fix**: Run a **Full Refresh** of the pipeline to clear all checkpoints and re-read from the source.
+**Fix**: Run a full refresh through the Ingest Archive job (see [Recovery When Checkpoint is Stale](#recovery-when-checkpoint-is-stale)) to clear all checkpoints and re-read from the source.
 
 ## Checkpoint Table ID Mismatch
 
@@ -55,7 +59,7 @@ If the upstream Delta Sharing provider recreates or modifies a system table (e.g
 
 **Impact**: Affected flows fail. SDP treats any flow failure as a pipeline failure, but unaffected flows may still complete. The batch companion task uses `run_if: ALL_DONE` so it runs regardless of streaming outcome.
 
-**Fix**: Run a **Full Refresh** to clear all checkpoints: `databricks pipelines start-update <pipeline-id> --full-refresh`.
+**Fix**: Run a full refresh through the Ingest Archive job to clear all checkpoints: `databricks jobs run-now --json '{"job_id": <archival_job_id>, "pipeline_params": {"full_refresh": true}}'`.
 
 **Prevention**: None — this is an upstream infrastructure event outside our control. The freshness job at 48h provides early warning before the 168h VACUUM window.
 
@@ -92,9 +96,23 @@ Duplicates can occur in two scenarios:
 
 A Full Refresh re-reads all available data and appends it to the sink. Data already in the archive gets appended again.
 
-**Mitigation**: The `dedup_streaming_sinks` workflow task runs automatically after every streaming pipeline execution. It removes duplicates from all 27 streaming sink tables using `INSERT OVERWRITE` with `ROW_NUMBER() OVER (PARTITION BY <natural_keys> ORDER BY <tiebreaker> DESC)`.
+**Mitigation**: The `dedup_streaming_sinks` workflow task runs automatically after every streaming pipeline execution in the Ingest Archive job. It removes duplicates from all 27 streaming sink tables using `INSERT OVERWRITE` with `ROW_NUMBER() OVER (PARTITION BY <natural_keys> ORDER BY ...)`, keeping one row per natural key.
 
-The dedup notebook (`src/dedup/dedup_streaming_tables.py`) contains the full natural key registry for all 27 tables. Each table's keys are categorized by pattern:
+**Which copy survives** depends on whether the table has row tracking (checked per table on every run):
+
+| Table state | `ORDER BY` | Surviving copy |
+|-------------|-----------|----------------|
+| Row tracking off | `<tiebreaker> DESC` | Latest tiebreaker value. Copies with the same tiebreaker are picked arbitrarily (the pre-1.6.0 behavior). |
+| Row tracking on | `_metadata.row_id ASC, <tiebreaker> DESC` | The earliest-written copy. A re-append always gets higher row IDs than rows already archived, so the archived row (including any downstream edit) is kept. |
+| Row tracking on, latest-state table | `<tiebreaker> DESC, _metadata.row_id ASC` | The newest version, then the earliest-written copy on a tie. Applies to `mlflow.experiments_latest`, `mlflow.runs_latest` and `lakeflow.zerobus_stream`, which hold the current state of an entity. |
+
+Row tracking only tells copies apart when the original was written (or backfilled) before the re-append. Enabling it assigns IDs to every copy present, so the task enables it only on a table that has no duplicates: a table without row tracking is first deduplicated with the tiebreaker ordering, then row tracking is enabled in the same run, and a table whose dedup failed is skipped until a later run cleans it. Tables that already have row tracking (newer runtimes can enable it on new tables by default) use the row-ID ordering from the first run.
+
+**Verification**: After each `INSERT OVERWRITE`, the task checks that `COUNT(*)` equals `COUNT(DISTINCT struct(<natural_keys>))`. `struct(...)` keeps rows whose key columns contain NULLs (such as `consumer_email` in the marketplace tables), which a multi-column `COUNT(DISTINCT ...)` would skip.
+
+**Failure**: Every table is attempted, even if an earlier one fails. After the summary, the task fails with an error that names each table that couldn't be deduplicated or verified. The task has its own failure email, because the leaf task `batch_companion` runs `ALL_DONE`: the job run shows "Succeeded with failures" and the job-level failure email does not fire. Serverless may retry the failed task automatically; the dedup is idempotent, and you get one email per failed attempt.
+
+The natural key registry for all 27 tables lives in `src/dedup/dedup_logic.py` (unit tested in `tests/unit/test_dedup_logic.py`). Each table's keys are categorized by pattern:
 
 | Category | Pattern | Example |
 |----------|---------|---------|
@@ -130,6 +148,39 @@ The 4-hour lookback buffer means some rows are re-read on consecutive runs. The 
 
 **If natural keys are incorrect**: Duplicates may appear. Fix the keys in the batch companion notebook's table config.
 
+## Row Tracking and Change Data Feed
+
+Since 1.6.0, the archive enables two Delta features so that downstream consumers can read it incrementally and the dedup can keep the right copy:
+
+- **Row tracking** (`delta.enableRowTracking`): every row gets a stable `_metadata.row_id` that survives `UPDATE`, `MERGE` and `OPTIMIZE`, and new inserts get higher IDs than existing rows.
+- **Change data feed** (`delta.enableChangeDataFeed`): row-level inserts, updates and deletes are readable with `table_changes()` or `readChangeFeed`.
+
+**Scope**: the 27 streaming sinks (by the dedup notebook) and the 4 watermark MERGE tables (by the batch notebook). The 6 full-overwrite tables are skipped: they're replaced daily, so their change feed would be the whole table every day.
+
+**When it's enabled**: on the first workflow run after deploying 1.6.0, in the maintenance step that runs after each notebook has processed its tables. Only missing properties are set; once both are on, the step commits nothing. A failure is reported under `feature_warnings` in the task's exit value and does not fail the task, because a table without row tracking keeps the tiebreaker ordering. A sink whose dedup failed in that run is skipped. On a table that didn't have row tracking yet, that first run's dedup uses the tiebreaker ordering; row-ID ordering starts with the next run. Some tables may already have row tracking, since newer runtimes can enable it on new tables by default; `SHOW TBLPROPERTIES` shows `delta.enableRowTracking`.
+
+**What enabling does to existing rows**: Delta assigns row IDs to every row already in the table (a "backfill"). This is recorded in the transaction log; the data files are not rewritten (validated: `numFiles` and `sizeInBytes` unchanged). It can still take a while on large tables.
+
+**No overlapping writes**: enabling row tracking conflicts with concurrent writes to the same table (`MetadataChangedException`). The workflow runs it after the pipeline has finished, so don't start the streaming pipeline on its own while the first post-upgrade run is in progress.
+
+**Reading incrementally**:
+
+```sql
+-- Changes since a table version (use the version you last processed)
+SELECT * FROM table_changes('<target_catalog>.billing.usage', <last_version> + 1);
+```
+
+```python
+(spark.readStream.option("readChangeFeed", "true")
+    .table("<target_catalog>.billing.usage"))
+```
+
+Materialized views over these tables can refresh incrementally because row tracking is on. On Databricks Runtime 19 and above, Delta can also derive the change feed from row tracking automatically.
+
+**Change feed churn from dedup**: when the dedup rewrites a table with `INSERT OVERWRITE`, the change feed shows every row of that table as deleted and re-inserted, and the rewritten rows get new row IDs. This happens only on runs that find duplicates (after a full refresh, or source-side compaction duplicates). A downstream consumer should treat a commit whose `operation` in `DESCRIBE HISTORY` is a `WRITE` with `mode: Overwrite` as a full reload, or deduplicate the feed on the natural keys.
+
+**Turning it off**: setting either property to `false` stops new tracking but does not downgrade the table protocol. Removing the feature needs `ALTER TABLE ... DROP FEATURE`. Leaving the features on after a rollback to 1.5.0 is harmless.
+
 ## Excluding and Re-Including Tables
 
 The `exclude_tables` bundle variable lets you skip specific tables without editing code.
@@ -155,7 +206,7 @@ For single-table exclusion, the CLI works too: `databricks bundle deploy --var="
 
 Remove the table from `exclude_tables` and redeploy.
 
-- **Streaming tables**: A Full Refresh may be needed if the checkpoint for the table is stale or missing. If the table's schema doesn't exist yet, run the setup job first (it's idempotent).
+- **Streaming tables**: A Full Refresh (through the Ingest Archive job) may be needed if the checkpoint for the table is stale or missing. If the table's schema doesn't exist yet, run the setup job first (it's idempotent).
 - **Batch watermark tables**: The watermark picks up from where it left off. The batch notebook creates schemas inline (`CREATE SCHEMA IF NOT EXISTS`), so no manual setup is needed.
 - **Batch overwrite tables**: Resume immediately with the next full overwrite. Schema is created inline.
 
@@ -180,7 +231,7 @@ When Databricks releases a new system table:
 3. **If batch-only**: Determine if it's a growing event table (use watermark MERGE) or a small reference table (use overwrite). Add to the appropriate list in `src/batch/batch_companion.py`.
 4. If the table uses a **new schema**, add the schema to `src/setup/00_setup.py` and run the setup job. (Schemas are also created inline by the streaming and batch code, but adding to setup ensures consistency.)
 5. Redeploy: `databricks bundle deploy`.
-6. Run a Full Refresh (streaming) or the batch notebook to backfill historical data.
+6. Run a Full Refresh through the Ingest Archive job (streaming) or the batch notebook to backfill historical data. For a streaming table, also add its natural key and tiebreaker to `DEDUP_KEYS` in `src/dedup/dedup_logic.py` and its time column to `FRESHNESS_COLUMNS` in `src/monitoring/freshness_check.py`; the unit tests fail if these drift from `STREAMING_TABLES`.
 
 ## Schema Evolution
 

@@ -22,6 +22,11 @@ resources:
             notebook_path: ../src/dedup/dedup_streaming_tables.py
             base_parameters:
               target_catalog: ${var.target_catalog}
+          # batch_companion (ALL_DONE) is the leaf task, so a dedup failure leaves the
+          # run "Succeeded with failures" and the job-level on_failure never fires.
+          email_notifications:
+            on_failure:
+              - ${workspace.current_user.userName}
 
         - task_key: "batch_companion"
           depends_on:

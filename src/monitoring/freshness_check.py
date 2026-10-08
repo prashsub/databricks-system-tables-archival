@@ -56,7 +56,7 @@ print(f"Exclude tables:    {EXCLUDE_TABLES if EXCLUDE_TABLES else '(none)'}")
 # MAGIC `system.<schema>.<table>`.
 # MAGIC
 # MAGIC Streaming time columns mirror the `tiebreaker` values in `DEDUP_KEYS`
-# MAGIC (`src/dedup/dedup_streaming_tables.py`); watermark time columns mirror
+# MAGIC (`src/dedup/dedup_logic.py`); watermark time columns mirror
 # MAGIC `BATCH_WATERMARK_TABLES` (`src/batch/batch_companion.py`). Keep them in sync
 # MAGIC when adding tables.
 

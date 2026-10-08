@@ -37,8 +37,9 @@ databricks bundle deploy
 # Trigger a manual run (streaming → dedup → batch)
 databricks bundle run system_tables_archival_workflow
 
-# Full refresh (clears streaming checkpoints -- safe, dedup removes duplicates automatically)
-databricks pipelines start-update <pipeline-id> --full-refresh
+# Full refresh (clears streaming checkpoints). Run it through the job so the dedup
+# task removes the re-appended rows; a standalone pipeline full refresh leaves them.
+databricks jobs run-now --json '{"job_id": <job-id>, "pipeline_params": {"full_refresh": true}}'
 
 # Check pipeline status
 databricks pipelines get <pipeline-id>
@@ -54,7 +55,7 @@ The archival workflow runs 3 tasks sequentially:
 | Task | Purpose | Typical Runtime |
 |------|---------|----------------|
 | `streaming_pipeline` | Incremental streaming ingest (27 tables) | ~2 min |
-| `dedup_streaming_sinks` | Check for and remove duplicates. Skips clean tables. | ~5 min (clean) |
+| `dedup_streaming_sinks` | Check for and remove duplicates, verify one row per key, fail (with email) if any table can't be fixed. Skips clean tables. | ~5 min (clean) |
 | `batch_companion` | Watermark MERGE (4 tables) + full overwrite (6 tables) | ~4 min |
 
 ## Excluding Tables
@@ -95,15 +96,16 @@ databricks bundle run system_tables_archival_workflow --target prod
 All archive tables are configured with:
 - **CLUSTER BY AUTO** — automatic liquid clustering (enforced on every dedup run)
 - **Predictive Optimization** — enabled at schema level (auto OPTIMIZE, VACUUM, ZORDER)
+- **Row tracking + change data feed** — on the 27 streaming sinks and 4 watermark MERGE tables, for incremental downstream reads (`table_changes()`)
 
-These are set during initial setup and maintained by the dedup notebook on every run.
+These are set during initial setup and maintained by the dedup and batch notebooks on every run.
 
 ## Troubleshooting
 
 ```bash
 # Stale checkpoint (> 7 days behind or "Delta sharing table null" error)
-# Safe: dedup task will automatically clean up duplicates from the re-append
-databricks pipelines start-update <pipeline-id> --full-refresh
+# Full refresh through the job: the dedup task then removes the re-appended rows
+databricks jobs run-now --json '{"job_id": <job-id>, "pipeline_params": {"full_refresh": true}}'
 
 # View pipeline event log
 databricks pipelines list-updates <pipeline-id>

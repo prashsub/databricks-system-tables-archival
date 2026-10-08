@@ -60,7 +60,7 @@ The System Tables Archival pipeline preserves Databricks System Table data indef
 
 ### 1. Never Delete Archive Data
 
-Sinks are append-only. Full Refresh re-appends -- it never drops or truncates the target table. This is the fundamental safety guarantee of the archive.
+Sinks are append-only. Full Refresh re-appends -- it never drops or truncates the target table. This is the fundamental safety guarantee of the archive. The re-appended rows are duplicates until the dedup task removes them, so a full refresh is run only through the Ingest Archive job, where the dedup task follows the pipeline.
 
 ### 2. Streaming First, Batch as Fallback
 
@@ -103,9 +103,9 @@ Streaming via SDP Delta sinks is the preferred ingestion method because it provi
 | 3 | Delta Sinks | Appends new rows to archive tables in `${target_catalog}` |
 | 4 | Dedup Notebook (Task 2) | Runs after pipeline completes (`run_if: ALL_DONE`) |
 | 5 | Duplicate check | For each of 27 streaming tables, checks for duplicate key groups via `GROUP BY ... HAVING COUNT(*) > 1 LIMIT 1`. If clean, skips the table (no rewrite). |
-| 6 | Dedup rewrite | If duplicates found, uses `INSERT OVERWRITE` with `ROW_NUMBER()` to atomically remove them. Also ensures `CLUSTER BY AUTO` on all tables. |
+| 6 | Dedup rewrite | If duplicates found, uses `INSERT OVERWRITE` with `ROW_NUMBER()` to atomically remove them, keeping the earliest-written copy on row-tracked tables (latest tiebreaker otherwise), then verifies one row per natural key. Fails the task, after attempting every table, if any table can't be deduplicated or verified. Also ensures `CLUSTER BY AUTO`, row tracking and change data feed on all streaming sinks. |
 | 7 | Batch Notebook (Task 3) | Runs after dedup completes (`run_if: ALL_DONE`) |
-| 8 | Watermark MERGE | Reads rows newer than `max(watermark) - buffer` from 4 source tables, MERGEs into archive |
+| 8 | Watermark MERGE | Reads rows newer than `max(watermark) - buffer` from 4 source tables, MERGEs into archive, and ensures row tracking and change data feed on those 4 tables |
 | 9 | Full Overwrite | Overwrites 6 small reference tables in archive |
 | 10 | Freshness Check (separate job) | At 8am UTC, compares each incremental archive table's latest timestamp against its source and fails if the source has rows >48h newer |
 

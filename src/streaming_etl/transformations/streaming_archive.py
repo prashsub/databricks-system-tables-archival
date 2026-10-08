@@ -5,7 +5,9 @@ Incrementally copies all streaming-capable system tables into persistent
 Delta sink tables using append_flow + Delta sinks.
 
 Key properties:
-- Full refresh is safe: re-appends to sinks, never deletes historical data.
+- Full refresh re-appends to the sinks and never deletes historical data, but it
+  leaves every re-read row duplicated. Run it only through the
+  "System Tables - Ingest Archive" job, whose dedup task removes the duplicates.
 - skipChangeCommits = true: handles upstream rolling deletes from Delta Sharing.
 - mergeSchema = true on every sink: Databricks adds columns and struct fields to
   system tables without notice, and the sink evolves the archive table to match.

@@ -2,6 +2,36 @@
 
 All notable changes to the System Tables Archival project.
 
+## [1.6.0] - 2026-10-08
+
+### Fixed
+
+- The dedup task swallowed failures. A table that couldn't be deduplicated was logged, and the task still succeeded. After a checkpoint reset this left `billing.usage` doubled with no alert. The task still attempts every table, but then fails, naming each table and its error.
+- The dedup kept an arbitrary copy when duplicates shared the same tiebreaker value, which is every copy after a full re-append. On tables with row tracking it now keeps the earliest-written copy, so downstream edits to archived rows survive a re-append. On the 3 latest-state tables (`mlflow.experiments_latest`, `mlflow.runs_latest`, `lakeflow.zerobus_stream`), the newest version still wins, with the earliest copy breaking ties.
+- A failed dedup task didn't send an email. The leaf task `batch_companion` runs `ALL_DONE`, so the run ended "Succeeded with failures" and the job-level failure email never fired. `dedup_streaming_sinks` now has its own failure email.
+
+### Added
+
+- Uniqueness check after every dedup rewrite: `COUNT(*)` must equal `COUNT(DISTINCT struct(<natural_keys>))`, which also counts keys that contain NULLs. A mismatch fails the table.
+- Row tracking and change data feed on the 27 streaming sinks (enabled by the dedup task's maintenance step) and the 4 watermark MERGE tables (enabled by the batch notebook), so downstream consumers can read the archive incrementally with `table_changes()` / `readChangeFeed`. Only missing properties are set, and a failure is a warning (`feature_warnings` in the task's exit value). See [Row Tracking and Change Data Feed](docs/architecture/operational-considerations.md#row-tracking-and-change-data-feed).
+- Each dedup result reports its `ordering` (`row_id` or `tiebreaker`).
+- Unit tests (`tests/unit`, run with `uv run --with pytest pytest -q`) and a Databricks integration notebook (`tests/integration/dedup_row_tracking_integration.py`).
+
+### Changed
+
+- The natural key registry and the dedup SQL moved from the dedup notebook to `src/dedup/dedup_logic.py`; the keys and tiebreakers are unchanged. Tables without row tracking use exactly the previous SQL.
+- Docs: a full refresh is safe only as a full-refresh run of the **System Tables - Ingest Archive** job (`databricks jobs run-now --json '{"job_id": <job-id>, "pipeline_params": {"full_refresh": true}}'`). A standalone pipeline full refresh leaves the re-appended duplicates in place until the next scheduled run.
+
+### Upgrading an existing deployment
+
+- Run `databricks bundle validate --strict --target <target>` and `databricks bundle deploy --target <target>`. Nothing is deleted, dropped or renamed. If the deploy plan shows a delete, stop and investigate.
+- Trigger one manual run of the Ingest Archive job off-hours (no full refresh). Its maintenance steps enable row tracking and change data feed. Enabling row tracking assigns row IDs to existing rows in the transaction log, without rewriting data files, but can take a while on large sinks.
+- Don't start the streaming pipeline on its own while that run is in progress. Enabling row tracking conflicts with concurrent writes to the same table.
+- This release doesn't repair tables that are already duplicated. On a sink without row tracking, the first run removes those duplicates with the previous ordering (latest tiebreaker) before enabling row tracking, and row-ID ordering applies from the next run. Fix the values of any rows you edited by hand.
+- Check `SHOW TBLPROPERTIES` on your sinks first: newer runtimes can enable row tracking on new tables by default. A sink that already has `delta.enableRowTracking=true` uses the row-ID ordering (earliest-written copy wins) from the first run.
+- Row tracking isn't enabled on a sink whose dedup failed in that run, so it's never enabled while a table still holds duplicates.
+- Rollback: `git revert` and redeploy. Row tracking and change data feed stay on, which is harmless; `ALTER TABLE ... DROP FEATURE` removes them if needed.
+
 ## [1.5.0] - 2026-10-08
 
 ### Fixed
